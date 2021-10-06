@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <limits.h>
+#include <netinet/in.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
@@ -21,6 +23,7 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -29,7 +32,9 @@
 #include "test/util/eventfd_util.h"
 #include "test/util/file_descriptor.h"
 #include "test/util/posix_error.h"
+#include "test/util/socket_util.h"
 #include "test/util/test_util.h"
+#include "test/util/thread_util.h"
 
 namespace gvisor {
 namespace testing {
@@ -494,6 +499,48 @@ TEST(EpollTest, PipeReaderHupAfterWriterClosed) {
               SyscallSucceedsWithValue(1));
   EXPECT_EQ(result[0].events, EPOLLHUP);
   EXPECT_EQ(result[0].data.u64, kMagicConstant);
+}
+
+TEST(EpollTest, DoubleLayerEpoll) {
+  const DisableSave ds;
+  FileDescriptor listen_fd =
+      ASSERT_NO_ERRNO_AND_VALUE(Socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
+  struct sockaddr_in sa;
+  sa.sin_family = AF_INET;
+  inet_aton("127.0.0.1", &sa.sin_addr);
+  sa.sin_port = htons(8888);
+  ASSERT_THAT(bind(listen_fd.get(), (struct sockaddr*)&sa, sizeof(sa)),
+              SyscallSucceeds());
+  listen(listen_fd.get(), 1);
+
+  auto epfd1 = ASSERT_NO_ERRNO_AND_VALUE(NewEpollFD());
+  ASSERT_NO_ERRNO(RegisterEpollFD(epfd1.get(), listen_fd.get(),
+                                  EPOLLIN | EPOLLHUP, listen_fd.get()));
+
+  auto epfd2 = ASSERT_NO_ERRNO_AND_VALUE(NewEpollFD());
+  ASSERT_NO_ERRNO(RegisterEpollFD(epfd2.get(), epfd1.get(), EPOLLIN | EPOLLHUP,
+                                  epfd1.get()));
+
+  // Connect and then check if epoll events were generated correctly.
+  // Run this loop a couple of times to check if event in epfd1 is cleaned.
+  for (int i = 0; i < 2; i++) {
+    struct epoll_event ret_events[2];
+    FileDescriptor sock =
+        ASSERT_NO_ERRNO_AND_VALUE(Socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
+    ScopedThread thread1([&sa, &sock]() {
+      sleep(1);
+      ASSERT_THAT(connect(sock.get(), (struct sockaddr*)&sa, sizeof(sa)),
+                  SyscallSucceeds());
+    });
+    ASSERT_THAT(epoll_wait(epfd2.get(), ret_events, 2, 2000),
+                SyscallSucceedsWithValue(1));
+    ASSERT_EQ(ret_events[0].data.fd, epfd1.get());
+    ASSERT_THAT(epoll_wait(epfd1.get(), ret_events, 2, 2000),
+                SyscallSucceedsWithValue(1));
+    ASSERT_EQ(ret_events[0].data.fd, listen_fd.get());
+    const FileDescriptor accepted =
+        ASSERT_NO_ERRNO_AND_VALUE(Accept(listen_fd.get(), nullptr, nullptr));
+  }
 }
 
 }  // namespace
