@@ -121,25 +121,27 @@ func parseHeader(ctx context.Context, f fullReader) (elfInfo, error) {
 	}
 
 	// Only some callers pre-check the ELF magic.
-	if !bytes.Equal(ident[:len(elfMagic)], []byte(elfMagic)) {
-		log.Infof("File is not an ELF")
-		return elfInfo{}, linuxerr.ENOEXEC
-	}
 
-	// We only support 64-bit, little endian binaries
-	if class := elf.Class(ident[elf.EI_CLASS]); class != elf.ELFCLASS64 {
-		log.Infof("Unsupported ELF class: %v", class)
-		return elfInfo{}, linuxerr.ENOEXEC
-	}
-	if endian := elf.Data(ident[elf.EI_DATA]); endian != elf.ELFDATA2LSB {
-		log.Infof("Unsupported ELF endianness: %v", endian)
-		return elfInfo{}, linuxerr.ENOEXEC
-	}
+	// 	log.Infof("File is not an ELF")
+	// 	return elfInfo{}, linuxerr.ENOEXEC
+	// }
 
-	if version := elf.Version(ident[elf.EI_VERSION]); version != elf.EV_CURRENT {
-		log.Infof("Unsupported ELF version: %v", version)
-		return elfInfo{}, linuxerr.ENOEXEC
-	}
+	// // We only support 64-bit, little endian binaries
+	// if class := elf.Class(ident[elf.EI_CLASS]); class != elf.ELFCLASS64 {
+	// 	log.Infof("Unsupported ELF class: %v", class)
+	// 	return elfInfo{}, linuxerr.ENOEXEC
+	// }
+	// if endian := elf.Data(ident[elf.EI_DATA]); endian != elf.ELFDATA2LSB {
+	// 	log.Infof("Unsupported ELF endianness: %v", endian)
+	// 	return elfInfo{}, linuxerr.ENOEXEC
+	// }
+
+	// if version := elf.Version(ident[elf.EI_VERSION]); version != elf.EV_CURRENT {
+	// 	log.Infof("Unsupported ELF version: %v", version)
+	// 	return elfInfo{}, linuxerr.ENOEXEC
+	// }
+    // byteOrder := binary.LittleEndian
+
 	// EI_OSABI is ignored by Linux, which is the only OS supported.
 	os := abi.Linux
 
@@ -157,83 +159,160 @@ func parseHeader(ctx context.Context, f fullReader) (elfInfo, error) {
 	hdr.UnmarshalUnsafe(hdrBuf)
 
 	// We support amd64 and arm64.
-	var a arch.Arch
-	switch machine := elf.Machine(hdr.Machine); machine {
-	case elf.EM_X86_64:
-		a = arch.AMD64
-	case elf.EM_AARCH64:
-		a = arch.ARM64
-	default:
-		log.Infof("Unsupported ELF machine %d", machine)
-		return elfInfo{}, linuxerr.ENOEXEC
-	}
+// <<<<<<< HEAD
+// 	var a arch.Arch
+// 	switch machine := elf.Machine(hdr.Machine); machine {
+// 	case elf.EM_X86_64:
+// 		a = arch.AMD64
+// 	case elf.EM_AARCH64:
+// 		a = arch.ARM64
+// 	default:
+// 		log.Infof("Unsupported ELF machine %d", machine)
+// 		return elfInfo{}, linuxerr.ENOEXEC
+// 	}
 
-	var sharedObject bool
-	elfType := elf.Type(hdr.Type)
-	switch elfType {
-	case elf.ET_EXEC:
-		sharedObject = false
-	case elf.ET_DYN:
-		sharedObject = true
-	default:
-		log.Infof("Unsupported ELF type %v", elfType)
-		return elfInfo{}, linuxerr.ENOEXEC
-	}
+// 	var sharedObject bool
+// 	elfType := elf.Type(hdr.Type)
+// 	switch elfType {
+// 	case elf.ET_EXEC:
+// 		sharedObject = false
+// 	case elf.ET_DYN:
+// 		sharedObject = true
+// 	default:
+// 		log.Infof("Unsupported ELF type %v", elfType)
+// 		return elfInfo{}, linuxerr.ENOEXEC
+// 	}
 
-	if int(hdr.Phentsize) != prog64Size {
-		log.Infof("Unsupported phdr size %d", hdr.Phentsize)
-		return elfInfo{}, linuxerr.ENOEXEC
-	}
-	totalPhdrSize := prog64Size * int(hdr.Phnum)
-	if totalPhdrSize < prog64Size {
-		log.Warningf("No phdrs or total phdr size overflows: prog64Size: %d phnum: %d", prog64Size, int(hdr.Phnum))
-		return elfInfo{}, linuxerr.ENOEXEC
-	}
-	if totalPhdrSize > maxTotalPhdrSize {
-		log.Infof("Too many phdrs (%d): total size %d > %d", hdr.Phnum, totalPhdrSize, maxTotalPhdrSize)
-		return elfInfo{}, linuxerr.ENOEXEC
-	}
-	if int64(hdr.Phoff) < 0 || int64(hdr.Phoff+uint64(totalPhdrSize)) < 0 {
-		ctx.Infof("Unsupported phdr offset %d", hdr.Phoff)
-		return elfInfo{}, linuxerr.ENOEXEC
-	}
+// 	if int(hdr.Phentsize) != prog64Size {
+// 		log.Infof("Unsupported phdr size %d", hdr.Phentsize)
+// 		return elfInfo{}, linuxerr.ENOEXEC
+// 	}
+// 	totalPhdrSize := prog64Size * int(hdr.Phnum)
+// 	if totalPhdrSize < prog64Size {
+// 		log.Warningf("No phdrs or total phdr size overflows: prog64Size: %d phnum: %d", prog64Size, int(hdr.Phnum))
+// 		return elfInfo{}, linuxerr.ENOEXEC
+// 	}
+// 	if totalPhdrSize > maxTotalPhdrSize {
+// 		log.Infof("Too many phdrs (%d): total size %d > %d", hdr.Phnum, totalPhdrSize, maxTotalPhdrSize)
+// 		return elfInfo{}, linuxerr.ENOEXEC
+// 	}
+// 	if int64(hdr.Phoff) < 0 || int64(hdr.Phoff+uint64(totalPhdrSize)) < 0 {
+// 		ctx.Infof("Unsupported phdr offset %d", hdr.Phoff)
+// 		return elfInfo{}, linuxerr.ENOEXEC
+// 	}
 
-	phdrBuf := make([]byte, totalPhdrSize)
-	_, err = f.ReadFull(ctx, usermem.BytesIOSequence(phdrBuf), int64(hdr.Phoff))
-	if err != nil {
-		log.Infof("Error reading ELF phdrs: %v", err)
-		// If phdrs were specified, they should all exist.
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			err = linuxerr.ENOEXEC
+// 	phdrBuf := make([]byte, totalPhdrSize)
+// 	_, err = f.ReadFull(ctx, usermem.BytesIOSequence(phdrBuf), int64(hdr.Phoff))
+// 	if err != nil {
+// 		log.Infof("Error reading ELF phdrs: %v", err)
+// 		// If phdrs were specified, they should all exist.
+// 		if err == io.EOF || err == io.ErrUnexpectedEOF {
+// 			err = linuxerr.ENOEXEC
+// =======
+	// BBLU: Comment out temporarily.
+	/*
+		var a arch.Arch
+		switch machine := elf.Machine(hdr.Machine); machine {
+		case elf.EM_X86_64:
+			a = arch.AMD64
+		case elf.EM_AARCH64:
+			a = arch.ARM64
+		default:
+			log.Infof("Unsupported ELF machine %d", machine)
+			return elfInfo{}, syserror.ENOEXEC
 		}
-		return elfInfo{}, err
-	}
 
-	phdrs := make([]elf.ProgHeader, hdr.Phnum)
-	for i := range phdrs {
-		var prog64 linux.ElfProg64
-		prog64.UnmarshalUnsafe(phdrBuf[:prog64Size])
-		phdrBuf = phdrBuf[prog64Size:]
-		phdrs[i] = elf.ProgHeader{
-			Type:   elf.ProgType(prog64.Type),
-			Flags:  elf.ProgFlag(prog64.Flags),
-			Off:    prog64.Off,
-			Vaddr:  prog64.Vaddr,
-			Paddr:  prog64.Paddr,
-			Filesz: prog64.Filesz,
-			Memsz:  prog64.Memsz,
-			Align:  prog64.Align,
+		var sharedObject bool
+		elfType := elf.Type(hdr.Type)
+		switch elfType {
+		case elf.ET_EXEC:
+			sharedObject = false
+		case elf.ET_DYN:
+			sharedObject = true
+		default:
+			log.Infof("Unsupported ELF type %v", elfType)
+			return elfInfo{}, syserror.ENOEXEC
 		}
-	}
+
+		if int(hdr.Phentsize) != prog64Size {
+			log.Infof("Unsupported phdr size %d", hdr.Phentsize)
+			return elfInfo{}, syserror.ENOEXEC
+		}
+		totalPhdrSize := prog64Size * int(hdr.Phnum)
+		if totalPhdrSize < prog64Size {
+			log.Warningf("No phdrs or total phdr size overflows: prog64Size: %d phnum: %d", prog64Size, int(hdr.Phnum))
+			return elfInfo{}, syserror.ENOEXEC
+		}
+		if totalPhdrSize > maxTotalPhdrSize {
+			log.Infof("Too many phdrs (%d): total size %d > %d", hdr.Phnum, totalPhdrSize, maxTotalPhdrSize)
+			return elfInfo{}, syserror.ENOEXEC
+		}
+		if int64(hdr.Phoff) < 0 || int64(hdr.Phoff+uint64(totalPhdrSize)) < 0 {
+			ctx.Infof("Unsupported phdr offset %d", hdr.Phoff)
+			return elfInfo{}, syserror.ENOEXEC
+		}
+
+		phdrBuf := make([]byte, totalPhdrSize)
+		_, err = f.ReadFull(ctx, usermem.BytesIOSequence(phdrBuf), int64(hdr.Phoff))
+		if err != nil {
+			log.Infof("Error reading ELF phdrs: %v", err)
+			// If phdrs were specified, they should all exist.
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				err = syserror.ENOEXEC
+			}
+			return elfInfo{}, err
+>>>>>>> test
+		}
+
+<<<<<<< HEAD
+        phdrs := make([]elf.ProgHeader, hdr.Phnum)
+        for i := range phdrs {
+            var prog64 linux.ElfProg64
+            prog64.UnmarshalUnsafe(phdrBuf[:prog64Size])
+            phdrBuf = phdrBuf[prog64Size:]
+            phdrs[i] = elf.ProgHeader{
+                Type:   elf.ProgType(prog64.Type),
+                Flags:  elf.ProgFlag(prog64.Flags),
+                Off:    prog64.Off,
+                Vaddr:  prog64.Vaddr,
+                Paddr:  prog64.Paddr,
+                Filesz: prog64.Filesz,
+                Memsz:  prog64.Memsz,
+                Align:  prog64.Align,
+=======
+		phdrs := make([]elf.ProgHeader, hdr.Phnum)
+		for i := range phdrs {
+			var prog64 elf.Prog64
+			binary.Unmarshal(phdrBuf[:prog64Size], byteOrder, &prog64)
+			phdrBuf = phdrBuf[prog64Size:]
+			phdrs[i] = elf.ProgHeader{
+				Type:   elf.ProgType(prog64.Type),
+				Flags:  elf.ProgFlag(prog64.Flags),
+				Off:    prog64.Off,
+				Vaddr:  prog64.Vaddr,
+				Paddr:  prog64.Paddr,
+				Filesz: prog64.Filesz,
+				Memsz:  prog64.Memsz,
+				Align:  prog64.Align,
+			}
+>>>>>>> test
+		}
+	*/
+	a := arch.AMD64
 
 	return elfInfo{
 		os:           os,
 		arch:         a,
+// <<<<<<< HEAD
+// 		entry:        hostarch.Addr(hdr.Entry),
+// 		phdrs:        phdrs,
+// =======
 		entry:        hostarch.Addr(hdr.Entry),
-		phdrs:        phdrs,
+		phdrs:        nil, //phdrs,
+// >>>>>>> test
 		phdrOff:      hdr.Phoff,
 		phdrSize:     prog64Size,
-		sharedObject: sharedObject,
+		sharedObject: false, //sharedObject,
 	}, nil
 }
 

@@ -8,8 +8,14 @@ go_binary(
         "main.go",
         "version.go",
     ],
-    pure = True,
+# <<<<<<< HEAD
+#     pure = True,
+#     tags = ["staging"],
+# =======
+    pure = False,
     tags = ["staging"],
+    static = True,
+# >>>>>>> test
     visibility = [
         "//visibility:public",
     ],
