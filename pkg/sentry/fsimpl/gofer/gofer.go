@@ -1595,7 +1595,10 @@ func (d *dentry) checkXattrPermissions(creds *auth.Credentials, name string, ats
 	// (b/148380782). Allow all other extended attributes to be passed through
 	// to the remote filesystem. This is inconsistent with Linux's 9p client,
 	// but consistent with other filesystems (e.g. FUSE).
-	if strings.HasPrefix(name, linux.XATTR_SECURITY_PREFIX) || strings.HasPrefix(name, linux.XATTR_SYSTEM_PREFIX) {
+	//
+	// NOTE(b/202533394): Also disallow "trusted" namespace for now. This is
+	// consistent with the VFS1 gofer client.
+	if strings.HasPrefix(name, linux.XATTR_SECURITY_PREFIX) || strings.HasPrefix(name, linux.XATTR_SYSTEM_PREFIX) || strings.HasPrefix(name, linux.XATTR_TRUSTED_PREFIX) {
 		return linuxerr.EOPNOTSUPP
 	}
 	mode := linux.FileMode(atomic.LoadUint32(&d.mode))
@@ -2046,16 +2049,7 @@ func (d *dentry) listXattr(ctx context.Context, size uint64) ([]string, error) {
 	}
 
 	if d.fs.opts.lisaEnabled {
-		xattrs, err := d.controlFDLisa.ListXattr(ctx, size)
-		if err != nil {
-			return nil, err
-		}
-
-		res := make([]string, 0, len(xattrs))
-		for _, xattr := range xattrs {
-			res = append(res, xattr)
-		}
-		return res, nil
+		return d.controlFDLisa.ListXattr(ctx, size)
 	}
 
 	xattrMap, err := d.file.listXattr(ctx, size)

@@ -18,6 +18,7 @@ import (
 	"math"
 
 	"golang.org/x/sys/unix"
+	"gvisor.dev/gvisor/pkg/eventfd"
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/link/sharedmem/queue"
 )
@@ -28,10 +29,12 @@ const (
 
 // tx holds all state associated with a tx queue.
 type tx struct {
-	data []byte
-	q    queue.Tx
-	ids  idManager
-	bufs bufferManager
+	data         []byte
+	q            queue.Tx
+	ids          idManager
+	bufs         bufferManager
+	eventFD      eventfd.Eventfd
+	sharedDataFD int
 }
 
 // init initializes all state needed by the tx queue based on the information
@@ -64,7 +67,8 @@ func (t *tx) init(mtu uint32, c *QueueConfig) error {
 	t.ids.init()
 	t.bufs.init(0, len(data), int(mtu))
 	t.data = data
-
+	t.eventFD = c.EventFD
+	t.sharedDataFD = c.SharedDataFD
 	return nil
 }
 
@@ -140,6 +144,12 @@ func (t *tx) transmit(bufs ...buffer.View) bool {
 	}
 
 	return true
+}
+
+// notify writes to the tx.eventFD to indicate to the peer that there is data to
+// be read.
+func (t *tx) notify() {
+	t.eventFD.Notify()
 }
 
 // getBuffer returns a memory region mapped to the full contents of the given

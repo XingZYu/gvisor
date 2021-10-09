@@ -274,6 +274,7 @@ var Metrics = tcpip.Stats{
 		ChecksumErrors:                     mustCreateMetric("/netstack/tcp/checksum_errors", "Number of segments dropped due to bad checksums."),
 		FailedPortReservations:             mustCreateMetric("/netstack/tcp/failed_port_reservations", "Number of time TCP failed to reserve a port."),
 		SegmentsAckedWithDSACK:             mustCreateMetric("/netstack/tcp/segments_acked_with_dsack", "Number of segments for which DSACK was received."),
+		SpuriousRecovery:                   mustCreateMetric("/netstack/tcp/spurious_recovery", "Number of times the connection entered loss recovery spuriously."),
 	},
 	UDP: tcpip.UDPStats{
 		PacketsReceived:          mustCreateMetric("/netstack/udp/packets_received", "Number of UDP datagrams received via HandlePacket."),
@@ -378,9 +379,9 @@ type socketOpsCommon struct {
 	// timestampValid indicates whether timestamp for SIOCGSTAMP has been
 	// set. It is protected by readMu.
 	timestampValid bool
-	// timestampNS holds the timestamp to use with SIOCTSTAMP. It is only
+	// timestamp holds the timestamp to use with SIOCTSTAMP. It is only
 	// valid when timestampValid is true. It is protected by readMu.
-	timestampNS int64
+	timestamp time.Time `state:".(int64)"`
 
 	// TODO(b/153685824): Move this to SocketOptions.
 	// sockOptInq corresponds to TCP_INQ.
@@ -409,15 +410,6 @@ func New(t *kernel.Task, family int, skType linux.SockType, protocol int, queue 
 var sockAddrInetSize = (*linux.SockAddrInet)(nil).SizeBytes()
 var sockAddrInet6Size = (*linux.SockAddrInet6)(nil).SizeBytes()
 var sockAddrLinkSize = (*linux.SockAddrLink)(nil).SizeBytes()
-
-// bytesToIPAddress converts an IPv4 or IPv6 address from the user to the
-// netstack representation taking any addresses into account.
-func bytesToIPAddress(addr []byte) tcpip.Address {
-	if bytes.Equal(addr, make([]byte, 4)) || bytes.Equal(addr, make([]byte, 16)) {
-		return ""
-	}
-	return tcpip.Address(addr)
-}
 
 // minSockAddrLen returns the minimum length in bytes of a socket address for
 // the socket's family.
@@ -468,7 +460,7 @@ func (s *socketOpsCommon) Release(ctx context.Context) {
 		t := kernel.TaskFromContext(ctx)
 		start := t.Kernel().MonotonicClock().Now()
 		deadline := start.Add(v.Timeout)
-		t.BlockWithDeadline(ch, true, deadline)
+		_ = t.BlockWithDeadline(ch, true, deadline)
 	}
 }
 
@@ -488,7 +480,7 @@ func (s *SocketOperations) Read(ctx context.Context, _ *fs.File, dst usermem.IOS
 }
 
 // WriteTo implements fs.FileOperations.WriteTo.
-func (s *SocketOperations) WriteTo(ctx context.Context, _ *fs.File, dst io.Writer, count int64, dup bool) (int64, error) {
+func (s *SocketOperations) WriteTo(_ context.Context, _ *fs.File, dst io.Writer, count int64, dup bool) (int64, error) {
 	s.readMu.Lock()
 	defer s.readMu.Unlock()
 
@@ -543,7 +535,7 @@ func (l *limitedPayloader) Len() int {
 }
 
 // ReadFrom implements fs.FileOperations.ReadFrom.
-func (s *SocketOperations) ReadFrom(ctx context.Context, _ *fs.File, r io.Reader, count int64) (int64, error) {
+func (s *SocketOperations) ReadFrom(_ context.Context, _ *fs.File, r io.Reader, count int64) (int64, error) {
 	f := limitedPayloader{
 		inner: io.LimitedReader{
 			R: r,
@@ -654,7 +646,7 @@ func (s *socketOpsCommon) Connect(t *kernel.Task, sockaddr []byte, blocking bool
 
 // Bind implements the linux syscall bind(2) for sockets backed by
 // tcpip.Endpoint.
-func (s *socketOpsCommon) Bind(t *kernel.Task, sockaddr []byte) *syserr.Error {
+func (s *socketOpsCommon) Bind(_ *kernel.Task, sockaddr []byte) *syserr.Error {
 	if len(sockaddr) < 2 {
 		return syserr.ErrInvalidArgument
 	}
@@ -714,7 +706,7 @@ func (s *socketOpsCommon) Bind(t *kernel.Task, sockaddr []byte) *syserr.Error {
 
 // Listen implements the linux syscall listen(2) for sockets backed by
 // tcpip.Endpoint.
-func (s *socketOpsCommon) Listen(t *kernel.Task, backlog int) *syserr.Error {
+func (s *socketOpsCommon) Listen(_ *kernel.Task, backlog int) *syserr.Error {
 	return syserr.TranslateNetstackError(s.Endpoint.Listen(backlog))
 }
 
@@ -805,7 +797,7 @@ func ConvertShutdown(how int) (tcpip.ShutdownFlags, *syserr.Error) {
 
 // Shutdown implements the linux syscall shutdown(2) for sockets backed by
 // tcpip.Endpoint.
-func (s *socketOpsCommon) Shutdown(t *kernel.Task, how int) *syserr.Error {
+func (s *socketOpsCommon) Shutdown(_ *kernel.Task, how int) *syserr.Error {
 	f, err := ConvertShutdown(how)
 	if err != nil {
 		return err
@@ -886,7 +878,7 @@ func boolToInt32(v bool) int32 {
 }
 
 // getSockOptSocket implements GetSockOpt when level is SOL_SOCKET.
-func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, family int, skType linux.SockType, name, outLen int) (marshal.Marshallable, *syserr.Error) {
+func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, family int, _ linux.SockType, name, outLen int) (marshal.Marshallable, *syserr.Error) {
 	// TODO(b/124056281): Stop rejecting short optLen values in getsockopt.
 	switch name {
 	case linux.SO_ERROR:
@@ -1402,11 +1394,11 @@ func getSockOptIPv6(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, name 
 			return nil, syserr.ErrProtocolNotAvailable
 		}
 
-		stack := inet.StackFromContext(t)
-		if stack == nil {
+		stk := inet.StackFromContext(t)
+		if stk == nil {
 			return nil, syserr.ErrNoDevice
 		}
-		info, err := netfilter.GetInfo(t, stack.(*Stack).Stack, outPtr, true)
+		info, err := netfilter.GetInfo(t, stk.(*Stack).Stack, outPtr, true)
 		if err != nil {
 			return nil, err
 		}
@@ -1422,11 +1414,11 @@ func getSockOptIPv6(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, name 
 			return nil, syserr.ErrProtocolNotAvailable
 		}
 
-		stack := inet.StackFromContext(t)
-		if stack == nil {
+		stk := inet.StackFromContext(t)
+		if stk == nil {
 			return nil, syserr.ErrNoDevice
 		}
-		entries, err := netfilter.GetEntries6(t, stack.(*Stack).Stack, outPtr, outLen)
+		entries, err := netfilter.GetEntries6(t, stk.(*Stack).Stack, outPtr, outLen)
 		if err != nil {
 			return nil, err
 		}
@@ -1442,8 +1434,8 @@ func getSockOptIPv6(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, name 
 			return nil, syserr.ErrProtocolNotAvailable
 		}
 
-		stack := inet.StackFromContext(t)
-		if stack == nil {
+		stk := inet.StackFromContext(t)
+		if stk == nil {
 			return nil, syserr.ErrNoDevice
 		}
 		ret, err := netfilter.TargetRevision(t, outPtr, header.IPv6ProtocolNumber)
@@ -1459,7 +1451,7 @@ func getSockOptIPv6(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, name 
 }
 
 // getSockOptIP implements GetSockOpt when level is SOL_IP.
-func getSockOptIP(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, name int, outPtr hostarch.Addr, outLen int, family int) (marshal.Marshallable, *syserr.Error) {
+func getSockOptIP(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, name int, outPtr hostarch.Addr, outLen int, _ int) (marshal.Marshallable, *syserr.Error) {
 	if _, ok := ep.(tcpip.Endpoint); !ok {
 		log.Warningf("SOL_IP options not supported on endpoints other than tcpip.Endpoint: option = %d", name)
 		return nil, syserr.ErrUnknownProtocolOption
@@ -1599,11 +1591,11 @@ func getSockOptIP(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, name in
 			return nil, syserr.ErrProtocolNotAvailable
 		}
 
-		stack := inet.StackFromContext(t)
-		if stack == nil {
+		stk := inet.StackFromContext(t)
+		if stk == nil {
 			return nil, syserr.ErrNoDevice
 		}
-		info, err := netfilter.GetInfo(t, stack.(*Stack).Stack, outPtr, false)
+		info, err := netfilter.GetInfo(t, stk.(*Stack).Stack, outPtr, false)
 		if err != nil {
 			return nil, err
 		}
@@ -1619,11 +1611,11 @@ func getSockOptIP(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, name in
 			return nil, syserr.ErrProtocolNotAvailable
 		}
 
-		stack := inet.StackFromContext(t)
-		if stack == nil {
+		stk := inet.StackFromContext(t)
+		if stk == nil {
 			return nil, syserr.ErrNoDevice
 		}
-		entries, err := netfilter.GetEntries4(t, stack.(*Stack).Stack, outPtr, outLen)
+		entries, err := netfilter.GetEntries4(t, stk.(*Stack).Stack, outPtr, outLen)
 		if err != nil {
 			return nil, err
 		}
@@ -1639,8 +1631,8 @@ func getSockOptIP(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, name in
 			return nil, syserr.ErrProtocolNotAvailable
 		}
 
-		stack := inet.StackFromContext(t)
-		if stack == nil {
+		stk := inet.StackFromContext(t)
+		if stk == nil {
 			return nil, syserr.ErrNoDevice
 		}
 		ret, err := netfilter.TargetRevision(t, outPtr, header.IPv4ProtocolNumber)
@@ -2186,12 +2178,12 @@ func setSockOptIPv6(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, name 
 			return syserr.ErrProtocolNotAvailable
 		}
 
-		stack := inet.StackFromContext(t)
-		if stack == nil {
+		stk := inet.StackFromContext(t)
+		if stk == nil {
 			return syserr.ErrNoDevice
 		}
 		// Stack must be a netstack stack.
-		return netfilter.SetEntries(t, stack.(*Stack).Stack, optVal, true)
+		return netfilter.SetEntries(t, stk.(*Stack).Stack, optVal, true)
 
 	case linux.IP6T_SO_SET_ADD_COUNTERS:
 		log.Infof("IP6T_SO_SET_ADD_COUNTERS is not supported")
@@ -2429,12 +2421,12 @@ func setSockOptIP(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, name in
 			return syserr.ErrProtocolNotAvailable
 		}
 
-		stack := inet.StackFromContext(t)
-		if stack == nil {
+		stk := inet.StackFromContext(t)
+		if stk == nil {
 			return syserr.ErrNoDevice
 		}
 		// Stack must be a netstack stack.
-		return netfilter.SetEntries(t, stack.(*Stack).Stack, optVal, false)
+		return netfilter.SetEntries(t, stk.(*Stack).Stack, optVal, false)
 
 	case linux.IPT_SO_SET_ADD_COUNTERS:
 		log.Infof("IPT_SO_SET_ADD_COUNTERS is not supported")
@@ -2601,7 +2593,7 @@ func emitUnimplementedEventIP(t *kernel.Task, name int) {
 
 // GetSockName implements the linux syscall getsockname(2) for sockets backed by
 // tcpip.Endpoint.
-func (s *socketOpsCommon) GetSockName(t *kernel.Task) (linux.SockAddr, uint32, *syserr.Error) {
+func (s *socketOpsCommon) GetSockName(*kernel.Task) (linux.SockAddr, uint32, *syserr.Error) {
 	addr, err := s.Endpoint.GetLocalAddress()
 	if err != nil {
 		return nil, 0, syserr.TranslateNetstackError(err)
@@ -2613,7 +2605,7 @@ func (s *socketOpsCommon) GetSockName(t *kernel.Task) (linux.SockAddr, uint32, *
 
 // GetPeerName implements the linux syscall getpeername(2) for sockets backed by
 // tcpip.Endpoint.
-func (s *socketOpsCommon) GetPeerName(t *kernel.Task) (linux.SockAddr, uint32, *syserr.Error) {
+func (s *socketOpsCommon) GetPeerName(*kernel.Task) (linux.SockAddr, uint32, *syserr.Error) {
 	addr, err := s.Endpoint.GetRemoteAddress()
 	if err != nil {
 		return nil, 0, syserr.TranslateNetstackError(err)
@@ -2774,7 +2766,7 @@ func (s *socketOpsCommon) updateTimestamp(cm tcpip.ControlMessages) {
 	// Save the SIOCGSTAMP timestamp only if SO_TIMESTAMP is disabled.
 	if !s.sockOptTimestamp {
 		s.timestampValid = true
-		s.timestampNS = cm.Timestamp
+		s.timestamp = cm.Timestamp
 	}
 }
 
@@ -2833,7 +2825,7 @@ func (s *socketOpsCommon) recvErr(t *kernel.Task, dst usermem.IOSequence) (int, 
 
 // RecvMsg implements the linux syscall recvmsg(2) for sockets backed by
 // tcpip.Endpoint.
-func (s *socketOpsCommon) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags int, haveDeadline bool, deadline ktime.Time, senderRequested bool, controlDataLen uint64) (n int, msgFlags int, senderAddr linux.SockAddr, senderAddrLen uint32, controlMessages socket.ControlMessages, err *syserr.Error) {
+func (s *socketOpsCommon) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags int, haveDeadline bool, deadline ktime.Time, senderRequested bool, _ uint64) (n int, msgFlags int, senderAddr linux.SockAddr, senderAddrLen uint32, controlMessages socket.ControlMessages, err *syserr.Error) {
 	if flags&linux.MSG_ERRQUEUE != 0 {
 		return s.recvErr(t, dst)
 	}
@@ -2998,7 +2990,7 @@ func (s *socketOpsCommon) ioctl(ctx context.Context, io usermem.IO, args arch.Sy
 			return 0, linuxerr.ENOENT
 		}
 
-		tv := linux.NsecToTimeval(s.timestampNS)
+		tv := linux.NsecToTimeval(s.timestamp.UnixNano())
 		_, err := tv.CopyOut(t, args[2].Pointer())
 		return 0, err
 
@@ -3105,7 +3097,7 @@ func Ioctl(ctx context.Context, ep commonEndpoint, io usermem.IO, args arch.Sysc
 }
 
 // interfaceIoctl implements interface requests.
-func interfaceIoctl(ctx context.Context, io usermem.IO, arg int, ifr *linux.IFReq) *syserr.Error {
+func interfaceIoctl(ctx context.Context, _ usermem.IO, arg int, ifr *linux.IFReq) *syserr.Error {
 	var (
 		iface inet.Interface
 		index int32
@@ -3113,8 +3105,8 @@ func interfaceIoctl(ctx context.Context, io usermem.IO, arg int, ifr *linux.IFRe
 	)
 
 	// Find the relevant device.
-	stack := inet.StackFromContext(ctx)
-	if stack == nil {
+	stk := inet.StackFromContext(ctx)
+	if stk == nil {
 		return syserr.ErrNoDevice
 	}
 
@@ -3124,7 +3116,7 @@ func interfaceIoctl(ctx context.Context, io usermem.IO, arg int, ifr *linux.IFRe
 		// Gets the name of the interface given the interface index
 		// stored in ifr_ifindex.
 		index = int32(hostarch.ByteOrder.Uint32(ifr.Data[:4]))
-		if iface, ok := stack.Interfaces()[index]; ok {
+		if iface, ok := stk.Interfaces()[index]; ok {
 			ifr.SetName(iface.Name)
 			return nil
 		}
@@ -3132,7 +3124,7 @@ func interfaceIoctl(ctx context.Context, io usermem.IO, arg int, ifr *linux.IFRe
 	}
 
 	// Find the relevant device.
-	for index, iface = range stack.Interfaces() {
+	for index, iface = range stk.Interfaces() {
 		if iface.Name == ifr.Name() {
 			found = true
 			break
@@ -3165,7 +3157,7 @@ func interfaceIoctl(ctx context.Context, io usermem.IO, arg int, ifr *linux.IFRe
 		}
 
 	case linux.SIOCGIFFLAGS:
-		f, err := interfaceStatusFlags(stack, iface.Name)
+		f, err := interfaceStatusFlags(stk, iface.Name)
 		if err != nil {
 			return err
 		}
@@ -3175,7 +3167,7 @@ func interfaceIoctl(ctx context.Context, io usermem.IO, arg int, ifr *linux.IFRe
 
 	case linux.SIOCGIFADDR:
 		// Copy the IPv4 address out.
-		for _, addr := range stack.InterfaceAddrs()[index] {
+		for _, addr := range stk.InterfaceAddrs()[index] {
 			// This ioctl is only compatible with AF_INET addresses.
 			if addr.Family != linux.AF_INET {
 				continue
@@ -3211,7 +3203,7 @@ func interfaceIoctl(ctx context.Context, io usermem.IO, arg int, ifr *linux.IFRe
 
 	case linux.SIOCGIFNETMASK:
 		// Gets the network mask of a device.
-		for _, addr := range stack.InterfaceAddrs()[index] {
+		for _, addr := range stk.InterfaceAddrs()[index] {
 			// This ioctl is only compatible with AF_INET addresses.
 			if addr.Family != linux.AF_INET {
 				continue
@@ -3243,24 +3235,24 @@ func interfaceIoctl(ctx context.Context, io usermem.IO, arg int, ifr *linux.IFRe
 }
 
 // ifconfIoctl populates a struct ifconf for the SIOCGIFCONF ioctl.
-func ifconfIoctl(ctx context.Context, t *kernel.Task, io usermem.IO, ifc *linux.IFConf) error {
+func ifconfIoctl(ctx context.Context, t *kernel.Task, _ usermem.IO, ifc *linux.IFConf) error {
 	// If Ptr is NULL, return the necessary buffer size via Len.
 	// Otherwise, write up to Len bytes starting at Ptr containing ifreq
 	// structs.
-	stack := inet.StackFromContext(ctx)
-	if stack == nil {
+	stk := inet.StackFromContext(ctx)
+	if stk == nil {
 		return syserr.ErrNoDevice.ToError()
 	}
 
 	if ifc.Ptr == 0 {
-		ifc.Len = int32(len(stack.Interfaces())) * int32(linux.SizeOfIFReq)
+		ifc.Len = int32(len(stk.Interfaces())) * int32(linux.SizeOfIFReq)
 		return nil
 	}
 
 	max := ifc.Len
 	ifc.Len = 0
-	for key, ifaceAddrs := range stack.InterfaceAddrs() {
-		iface := stack.Interfaces()[key]
+	for key, ifaceAddrs := range stk.InterfaceAddrs() {
+		iface := stk.Interfaces()[key]
 		for _, ifaceAddr := range ifaceAddrs {
 			// Don't write past the end of the buffer.
 			if ifc.Len+int32(linux.SizeOfIFReq) > max {

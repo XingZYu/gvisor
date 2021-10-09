@@ -19,9 +19,7 @@ package sharedmem
 
 import (
 	"bytes"
-	"io/ioutil"
 	"math/rand"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -104,24 +102,36 @@ func newTestContext(t *testing.T, mtu, bufferSize uint32, addr tcpip.LinkAddress
 		t:        t,
 		packetCh: make(chan struct{}, 1000000),
 	}
-	c.txCfg = createQueueFDs(t, queueSizes{
+	c.txCfg, err = createQueueFDs(queueSizes{
 		dataSize:       queueDataSize,
 		txPipeSize:     queuePipeSize,
 		rxPipeSize:     queuePipeSize,
 		sharedDataSize: 4096,
 	})
-
-	c.rxCfg = createQueueFDs(t, queueSizes{
+	if err != nil {
+		t.Fatalf("createQueueFDs for tx failed: %s", err)
+	}
+	c.rxCfg, err = createQueueFDs(queueSizes{
 		dataSize:       queueDataSize,
 		txPipeSize:     queuePipeSize,
 		rxPipeSize:     queuePipeSize,
 		sharedDataSize: 4096,
 	})
+	if err != nil {
+		t.Fatalf("createQueueFDs for rx failed: %s", err)
+	}
 
 	initQueue(t, &c.txq, &c.txCfg)
 	initQueue(t, &c.rxq, &c.rxCfg)
 
-	ep, err := New(mtu, bufferSize, addr, c.txCfg, c.rxCfg)
+	ep, err := New(Options{
+		MTU:         mtu,
+		BufferSize:  bufferSize,
+		LinkAddress: addr,
+		TX:          c.txCfg,
+		RX:          c.rxCfg,
+		PeerFD:      -1,
+	})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -150,8 +160,8 @@ func (c *testContext) DeliverOutboundPacket(remoteLinkAddr, localLinkAddr tcpip.
 
 func (c *testContext) cleanup() {
 	c.ep.Close()
-	closeFDs(&c.txCfg)
-	closeFDs(&c.rxCfg)
+	closeFDs(c.txCfg)
+	closeFDs(c.rxCfg)
 	c.txq.cleanup()
 	c.rxq.cleanup()
 }
@@ -188,69 +198,6 @@ func shuffle(b []int) {
 	for i := len(b) - 1; i >= 0; i-- {
 		j := rand.Intn(i + 1)
 		b[i], b[j] = b[j], b[i]
-	}
-}
-
-func createFile(t *testing.T, size int64, initQueue bool) int {
-	tmpDir, ok := os.LookupEnv("TEST_TMPDIR")
-	if !ok {
-		tmpDir = os.Getenv("TMPDIR")
-	}
-	f, err := ioutil.TempFile(tmpDir, "sharedmem_test")
-	if err != nil {
-		t.Fatalf("TempFile failed: %v", err)
-	}
-	defer f.Close()
-	unix.Unlink(f.Name())
-
-	if initQueue {
-		// Write the "slot-free" flag in the initial queue.
-		_, err := f.WriteAt([]byte{0, 0, 0, 0, 0, 0, 0, 0x80}, 0)
-		if err != nil {
-			t.Fatalf("WriteAt failed: %v", err)
-		}
-	}
-
-	fd, err := unix.Dup(int(f.Fd()))
-	if err != nil {
-		t.Fatalf("Dup failed: %v", err)
-	}
-
-	if err := unix.Ftruncate(fd, size); err != nil {
-		unix.Close(fd)
-		t.Fatalf("Ftruncate failed: %v", err)
-	}
-
-	return fd
-}
-
-func closeFDs(c *QueueConfig) {
-	unix.Close(c.DataFD)
-	unix.Close(c.EventFD)
-	unix.Close(c.TxPipeFD)
-	unix.Close(c.RxPipeFD)
-	unix.Close(c.SharedDataFD)
-}
-
-type queueSizes struct {
-	dataSize       int64
-	txPipeSize     int64
-	rxPipeSize     int64
-	sharedDataSize int64
-}
-
-func createQueueFDs(t *testing.T, s queueSizes) QueueConfig {
-	fd, _, err := unix.RawSyscall(unix.SYS_EVENTFD2, 0, 0, 0)
-	if err != 0 {
-		t.Fatalf("eventfd failed: %v", error(err))
-	}
-
-	return QueueConfig{
-		EventFD:      int(fd),
-		DataFD:       createFile(t, s.dataSize, false),
-		TxPipeFD:     createFile(t, s.txPipeSize, true),
-		RxPipeFD:     createFile(t, s.rxPipeSize, true),
-		SharedDataFD: createFile(t, s.sharedDataSize, false),
 	}
 }
 
@@ -672,7 +619,7 @@ func TestSimpleReceive(t *testing.T) {
 		// Push completion.
 		c.pushRxCompletion(uint32(len(contents)), bufs)
 		c.rxq.rx.Flush()
-		unix.Write(c.rxCfg.EventFD, []byte{1, 0, 0, 0, 0, 0, 0, 0})
+		c.rxCfg.EventFD.Notify()
 
 		// Wait for packet to be received, then check it.
 		c.waitForPackets(1, time.After(5*time.Second), "Timeout waiting for packet")
@@ -718,7 +665,7 @@ func TestRxBuffersReposted(t *testing.T) {
 		// Complete the buffer.
 		c.pushRxCompletion(buffers[i].Size, buffers[i:][:1])
 		c.rxq.rx.Flush()
-		unix.Write(c.rxCfg.EventFD, []byte{1, 0, 0, 0, 0, 0, 0, 0})
+		c.rxCfg.EventFD.Notify()
 
 		// Wait for it to be reposted.
 		bi := queue.DecodeRxBufferHeader(pollPull(t, &c.rxq.tx, timeout, "Timeout waiting for buffer to be reposted"))
@@ -734,7 +681,7 @@ func TestRxBuffersReposted(t *testing.T) {
 		// Complete with two buffers.
 		c.pushRxCompletion(2*bufferSize, buffers[2*i:][:2])
 		c.rxq.rx.Flush()
-		unix.Write(c.rxCfg.EventFD, []byte{1, 0, 0, 0, 0, 0, 0, 0})
+		c.rxCfg.EventFD.Notify()
 
 		// Wait for them to be reposted.
 		for j := 0; j < 2; j++ {
@@ -759,7 +706,7 @@ func TestReceivePostingIsFull(t *testing.T) {
 	first := queue.DecodeRxBufferHeader(pollPull(t, &c.rxq.tx, time.After(time.Second), "Timeout waiting for first buffer to be posted"))
 	c.pushRxCompletion(first.Size, []queue.RxBuffer{first})
 	c.rxq.rx.Flush()
-	unix.Write(c.rxCfg.EventFD, []byte{1, 0, 0, 0, 0, 0, 0, 0})
+	c.rxCfg.EventFD.Notify()
 
 	// Check that packet is received.
 	c.waitForPackets(1, time.After(time.Second), "Timeout waiting for completed packet")
@@ -768,7 +715,7 @@ func TestReceivePostingIsFull(t *testing.T) {
 	second := queue.DecodeRxBufferHeader(pollPull(t, &c.rxq.tx, time.After(time.Second), "Timeout waiting for second buffer to be posted"))
 	c.pushRxCompletion(second.Size, []queue.RxBuffer{second})
 	c.rxq.rx.Flush()
-	unix.Write(c.rxCfg.EventFD, []byte{1, 0, 0, 0, 0, 0, 0, 0})
+	c.rxCfg.EventFD.Notify()
 
 	// Check that no packet is received yet, as the worker is blocked trying
 	// to repost.
@@ -781,7 +728,7 @@ func TestReceivePostingIsFull(t *testing.T) {
 	// Flush tx queue, which will allow the first buffer to be reposted,
 	// and the second completion to be pulled.
 	c.rxq.tx.Flush()
-	unix.Write(c.rxCfg.EventFD, []byte{1, 0, 0, 0, 0, 0, 0, 0})
+	c.rxCfg.EventFD.Notify()
 
 	// Check that second packet completes.
 	c.waitForPackets(1, time.After(time.Second), "Timeout waiting for second completed packet")
@@ -803,7 +750,7 @@ func TestCloseWhileWaitingToPost(t *testing.T) {
 	bi := queue.DecodeRxBufferHeader(pollPull(t, &c.rxq.tx, time.After(time.Second), "Timeout waiting for initial buffer to be posted"))
 	c.pushRxCompletion(bi.Size, []queue.RxBuffer{bi})
 	c.rxq.rx.Flush()
-	unix.Write(c.rxCfg.EventFD, []byte{1, 0, 0, 0, 0, 0, 0, 0})
+	c.rxCfg.EventFD.Notify()
 
 	// Wait for packet to be indicated.
 	c.waitForPackets(1, time.After(time.Second), "Timeout waiting for completed packet")
