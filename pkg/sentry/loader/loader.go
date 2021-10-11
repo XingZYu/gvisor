@@ -216,7 +216,7 @@ func loadExecutable(ctx context.Context, args LoadArgs) (loadedELF, arch.Context
 			_, err = args.File.ReadFull(ctx, usermem.BytesIOSequence(GBuf[:]), 0)
 			if err != nil {
 				// The entire ident array always exists.
-				return loadedELF{}, nil, nil, nil, syserror.ENOEXEC
+				return loadedELF{}, nil, nil, nil, linuxerr.ENOEXEC
 			}
 
 			// An ELF is always terminal. Hold on to file.

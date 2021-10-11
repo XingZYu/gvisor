@@ -25,7 +25,8 @@ go_library(
         "//pkg/sentry/platform",
         "//pkg/sentry/platform/interrupt",
         "//pkg/sync",
-        "//pkg/usermem",
+        # "//pkg/usermem",
+        "//pkg/hostarch",
         "@org_golang_x_sys//unix:go_default_library",
     ],
 )

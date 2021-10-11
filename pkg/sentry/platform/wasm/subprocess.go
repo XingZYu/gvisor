@@ -26,7 +26,8 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/memmap"
 	"gvisor.dev/gvisor/pkg/sentry/platform"
 	"gvisor.dev/gvisor/pkg/sync"
-	"gvisor.dev/gvisor/pkg/usermem"
+    "gvisor.dev/gvisor/pkg/hostarch"
+	// "gvisor.dev/gvisor/pkg/usermem"
 )
 
 // subprocess is a collection of threads being traced.
@@ -70,12 +71,12 @@ func (t *thread) NotifyInterrupt() {
 }
 */
 // MapFile implements platform.AddressSpace.MapFile.
-func (s *subprocess) MapFile(addr usermem.Addr, f memmap.File, fr memmap.FileRange, at usermem.AccessType, precommit bool) error {
+func (s *subprocess) MapFile(addr hostarch.Addr, f memmap.File, fr memmap.FileRange, at hostarch.AccessType, precommit bool) error {
 	return nil
 }
 
 // Unmap implements platform.AddressSpace.Unmap.
-func (s *subprocess) Unmap(addr usermem.Addr, length uint64) {
+func (s *subprocess) Unmap(addr hostarch.Addr, length uint64) {
 }
 
 // PreFork implements platform.AddressSpace.PreFork.

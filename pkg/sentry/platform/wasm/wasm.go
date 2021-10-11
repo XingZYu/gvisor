@@ -18,6 +18,7 @@ import (
 	"os"
 
 	pkgcontext "gvisor.dev/gvisor/pkg/context"
+    "gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/loader"
@@ -25,7 +26,8 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/platform/interrupt"
 	"gvisor.dev/gvisor/pkg/sentry/wasmvm"
 	"gvisor.dev/gvisor/pkg/sync"
-	"gvisor.dev/gvisor/pkg/usermem"
+	// "gvisor.dev/gvisor/pkg/usermem"
+    "gvisor.dev/gvisor/pkg/hostarch"
 )
 
 type context struct {
@@ -43,7 +45,7 @@ func setExit(regs *arch.Registers) {
 }
 
 // Switch runs the provided context in the given address space.
-func (c *context) Switch(ctx pkgcontext.Context, mm platform.MemoryManager, ac arch.Context, cpu int32) (*arch.SignalInfo, usermem.AccessType, error) {
+func (c *context) Switch(ctx pkgcontext.Context, mm platform.MemoryManager, ac arch.Context, cpu int32) (*linux.SignalInfo, hostarch.AccessType, error) {
 	errChan := make(chan error)
 	go func() {
 		glbWASI, err := wasmvm.NewWasmProc(wasmvm.NewWasmTimeVM(), ctx)
@@ -70,7 +72,7 @@ func (c *context) Switch(ctx pkgcontext.Context, mm platform.MemoryManager, ac a
 
 	setExit(&ac.StateData().Regs)
 
-	return nil, usermem.NoAccess, nil
+	return nil, hostarch.NoAccess, nil
 }
 
 // Interrupt interrupts the running guest application associated with this context.
@@ -118,7 +120,7 @@ func (*WASM) MapUnit() uint64 {
 
 // MaxUserAddress returns the first address that may not be used by user
 // applications.
-func (*WASM) MaxUserAddress() usermem.Addr {
+func (*WASM) MaxUserAddress() hostarch.Addr {
 	//return usermem.Addr(stubStart)
 	return 0xffff000000000000
 }

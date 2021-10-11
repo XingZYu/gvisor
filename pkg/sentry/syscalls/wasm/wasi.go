@@ -19,7 +19,8 @@ import (
 	"fmt"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
-	"gvisor.dev/gvisor/pkg/syserror"
+	// "gvisor.dev/gvisor/pkg/syserr"
+	"gvisor.dev/gvisor/pkg/errors/linuxerr"
 	//	"gvisor.dev/gvisor/pkg/wasmvm"
 	//"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
@@ -45,7 +46,7 @@ func FdWrite(t *kernel.Task, fd int32, src usermem.IOSequence, written int32) in
 	//      src := usermem.IOSequence{}
 
 	n, err := file.Writev(t, src)
-	if err != syserror.ErrWouldBlock || file.Flags().NonBlocking {
+	if err != linuxerr.EWOULDBLOCK || file.Flags().NonBlocking {
 		if n > 0 {
 			// Queue notification if we wrote anything.
 			file.Dirent.InotifyEvent(linux.IN_MODIFY, 0)

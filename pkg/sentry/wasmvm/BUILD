@@ -16,7 +16,7 @@ go_library(
 	"//pkg/abi/linux",
 	"//pkg/log",
 	"//pkg/context",
-	"//pkg/syserror",
+	"//pkg/syserr",
 	"//pkg/usermem",
 	"//pkg/sentry/kernel",
 	"//pkg/sentry/syscalls/wasm",
