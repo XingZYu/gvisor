@@ -590,6 +590,7 @@ cc_binary(
         "//test/util:posix_error",
         "//test/util:test_main",
         "//test/util:test_util",
+        "//test/util:thread_util",
     ],
 )
 
@@ -1978,6 +1979,7 @@ cc_binary(
     defines = select_system(),
     linkstatic = 1,
     deps = [
+        ":ip_socket_test_util",
         ":unix_domain_socket_test_util",
         "//test/util:capability_util",
         "//test/util:file_descriptor",
